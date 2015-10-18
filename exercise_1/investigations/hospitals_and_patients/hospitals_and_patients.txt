@@ -1,0 +1,18 @@
+Question: Are average scores for hospital quality or procedural variability correlated with patient survey responses? 
+
+Methodology:  There are three different types of scores here: hospital quality, procedural variabiltiy, and surveys.  \
+As stated in the quesiton, I took the average of each hospital's qualtiy scores in effective_care and readmissions.  
+Although I ignored ranking for this question, I continued to mutliply the readmissions scores by -1 to account for the fact that they are not desirable measures.
+I decided to split procedural variability into two different measures: One for variance of postive scores from effect_care and one for variance of negative scores from readmissions.  If I combined the two variances together into a single measure, I fear that the variance just due to having postive and negative values in the same sequence would overshadow actual procedural variability.  Also, it's plausible to think that variance in positive treatment measures might have a different effect on patient satisfaction than negative treatment measures.  
+Although there were several scores to look at in the survey_results table, I decided to only focus on the last two HCAHPSBaseScore and HCAHPSConsistency score.  According to the Hospital.pdf document, these two scores when summed form a normalized survey statistic.  
+
+
+
+Data:  
+Row(Correlation_between_hospital_quality_scores_and_survey_scores=-0.045892734390749729, 
+Correlation_between_procedure_variance_and_survey_scores=-0.11890220537028162, 
+Correlation_between_readmissionsdeathrates_variance_and_survey_scores=-0.13437852476293624)
+
+
+
+Conclusion:  There does not appear to be any significant correlation between hospital quality scores or procedure variability.  This might be due to the fact that many measures of hospital quality, such as Satin at Discharge, look at activities that go on behind the scenes or at least while a patient is under a sedative.  It's also possible that it might have been a mistake to mix effective_care scores with readmissions to begin with.

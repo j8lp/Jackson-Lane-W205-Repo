@@ -1,0 +1,18 @@
+Question:Which procedures have the greatest variability between hospitals? 
+
+Methology: Take the variances of scores for each type of measure.
+
+Data:
+measurename	variance
+ED1	8,617.740839212507
+ED2	3,864.6924460743544
+OP 18	1,656.5529409803205
+Median Time to Transfer to Another Facility for Acute Coronary Intervention	869.0306968514053
+Thrombolytic Therapy	481.98665882944397
+Head CT results	477.18888614639235
+Fibrinolytic Therapy Received Within 30 Minutes Of Hospital Arrival	352.6666666666667
+Fibrinolytic Therapy Received Within 30 Minutes of ED Arrival	325.74632352941165
+Median time to pain med	314.0819735739413
+
+Conclusion: I'm not sure what ED1 and ED2 are, but they have huge variances.
+Note how all the measures are from the effective_care table and not the readmissions table.  That's probably because the measures from readmissions looks exclusively at ratio data.  It's probably not fair to compare the variance of something like "Median Time to Transfer to Another Facility," which has no upper bound, to something like "Death Rates for CACB," which will be at most 100.  

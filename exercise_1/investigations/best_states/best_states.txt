@@ -1,0 +1,24 @@
+Question: What states are models of high-quality care? 
+
+Methology: I will use the same data from the effective_care and readmissions tables to answer this question as I did for the previous question.  However, instead of ranking from low to high, I will rank from high to low.  This means that the numerically lower ranks indicate higher quality.  
+Also, instead of summing the ranks, I will take the average of all the ranks for hospitals in a particular state.  This wya, smaller states like Vermount are not at a disadvantage.  This approach assumes however that each state offers the same procedures between all of their hospitals.  I think that this is a reasonable assumption to make.
+
+Data:
++-----+------------------+
+|State|avg(rank)         |
++-----+------------------+
+|DE   |1034.43125        |
+|ME   |1098.0761750405186|
+|NH   |1119.608459869848 |
+|MA   |1196.0694994598487|
+|NC   |1198.80817679558  |
+|FL   |1203.1246867915522|
+|SC   |1206.8103846153847|
+|HI   |1214.2738095238096|
+|NJ   |1225.3624535315985|
+|VA   |1232.4057490326147|
++-----+------------------+
+
+Conclusions:
+
+The table shows that Delaware has the best hospital quality.  In general, most of the states on this are on the east coast, with the exception of Hawaii.  

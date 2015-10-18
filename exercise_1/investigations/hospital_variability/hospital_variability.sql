@@ -1,0 +1,1 @@
+select measurename, variance(score) as variance from procedures group by measurename order by variance DESC LIMIT 10

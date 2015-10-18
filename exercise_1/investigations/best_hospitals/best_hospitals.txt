@@ -1,0 +1,27 @@
+Question: What hospitals are models of high-quality care—that is, which hospitals have the most consistently high scores for a variety of procedures? 
+
+Methology: For this question, I will use data from the effective_care and readmissions tables.  I will use the Score column from each table as the measure of quality, but since the measures in the readmissions table seem to cover undesirable metrics like death rates and rates of readmission, I will multiply the scores from the readmissions table by -1 to capture the fact that a high score for a readmissions measure should have a negative impact on hospital quality.
+To normalize scores, I will rank each score for each hospital against other hospitals' scores for the same measure.  I rank low to high, meaning that lower values will get nurmerically lower ranks.  For example, the hospital with the lowest score for the measure "Anticoagulation overlap therapy" will get a rank of 1 for that measure.  a  with the Note that this means that numerically higher ranks,such as 1000, actually indicate higher quality.  Also note, that the scores from readmissions are still multiplied by -1.  
+After normalizing scores, I will then sum the numerical values of each hospital's ranks.  This sum will become my metric for hospital quality.  
+I decided to use this rather unorthodox metrix because it takes into account both quality and variety of procedures.  This means that a hospital that performs many procedures poorly might get a higher rating than a hospital that performs just a few procedures perfectly.
+
+Data:
+
++----------+------------------------------------------------+---------+
+|ProviderID|HospitalName                                    |sum(rank)|
++----------+------------------------------------------------+---------+
+|450021    |BAYLOR UNIVERSITY MEDICAL CENTER                |97145    |
+|100070    |VENICE REGIONAL MEDICAL CENTER - BAYFRONT HEALTH|96704    |
+|100008    |BAPTIST HOSPITAL OF MIAMI INC                   |96532    |
+|220077    |BAYSTATE MEDICAL CENTER                         |96349    |
+|030023    |FLAGSTAFF MEDICAL CENTER                        |96189    |
+|100087    |SARASOTA MEMORIAL HOSPITAL                      |95428    |
+|450723    |METHODIST CHARLTON MEDICAL CENTER               |95333    |
+|050739    |CENTINELA HOSPITAL MEDICAL CENTER               |95274    |
+|050024    |PARADISE VALLEY HOSPITAL                        |94855    |
+|050503    |SCRIPPS MEMORIAL HOSPITAL - ENCINITAS           |94623    |
++----------+------------------------------------------------+---------+
+
+Conclusions:
+
+The table shows that Baylor University Medical Center has the highest hosptial quality.  In general, the hospitals on this table are going to be large hospitals that perform a variety of procedures
