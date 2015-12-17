@@ -1,0 +1,1675 @@
+# Copyright 2011-2015 Splunk, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"): you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
+#
+# The purpose of this module is to provide a friendlier domain interface to
+# various Splunk endpoints. The approach here is to leverage the binding
+# layer to capture endpoint context and provide objects and methods that
+# offer simplified access their corresponding endpoints. The design avoids
+# caching resource state. From the perspective of this module, the 'policy'
+# for caching resource state belongs in the application or a higher level
+# framework, and its the purpose of this module to provide simplified
+# access to that resource state.
+#
+# A side note, the objects below that provide helper methods for updating eg:
+# Entity state, are written so that they may be used in a fluent style.
+#
+
+"""The **splunklib.client** module provides a Pythonic interface to the
+`Splunk REST API <http://docs.splunk.com/Documentation/Splunk/latest/RESTAPI/RESTcontents>`_,
+allowing you programmatically access Splunk's resources.
+
+**splunklib.client** wraps a Pythonic layer around the wire-level
+binding of the **splunklib.binding** module. The core of the library is the
+:class:`Service` class, which encapsulates a connection to the server, and
+provides access to the various aspects of Splunk's functionality, which are
+exposed via the REST API. Typically you connect to a running Splunk instance
+with the :func:`connect` function::
+
+    import splunklib.client as client
+    service = client.connect(host='localhost', port=8089,
+                       username='admin', password='...')
+    assert isinstance(service, client.Service)
+
+:class:`Service` objects have fields for the various Splunk resources (such as apps,
+jobs, saved searches, inputs, and indexes). All of these fields are
+:class:`Collection` objects::
+
+    appcollection = service.apps
+    my_app = appcollection.create('my_app')
+    my_app = appcollection['my_app']
+    appcollection.delete('my_app')
+
+The individual elements of the collection, in this case *applications*,
+are subclasses of :class:`Entity`. An ``Entity`` object has fields for its
+attributes, and methods that are specific to each kind of entity. For example::
+
+    print my_app['author']  # Or: print my_app.author
+    my_app.package()  # Creates a compressed package of this application
+"""
+
+import datetime
+import json
+import urllib
+import logging
+from time import sleep
+from datetime import datetime, timedelta
+import socket
+import contextlib
+
+from binding import Context, HTTPError, AuthenticationError, namespace, UrlEncoded, _encode, _make_cookie_header
+from data import record
+import data
+
+__all__ = [
+    "connect",
+    "NotSupportedError",
+    "OperationError",
+    "IncomparableException",
+    "Service",
+    "namespace"
+]
+
+PATH_APPS = "apps/local/"
+PATH_CAPABILITIES = "authorization/capabilities/"
+PATH_CONF = "configs/conf-%s/"
+PATH_PROPERTIES = "properties/"
+PATH_DEPLOYMENT_CLIENTS = "deployment/client/"
+PATH_DEPLOYMENT_TENANTS = "deployment/tenants/"
+PATH_DEPLOYMENT_SERVERS = "deployment/server/"
+PATH_DEPLOYMENT_SERVERCLASSES = "deployment/serverclass/"
+PATH_EVENT_TYPES = "saved/eventtypes/"
+PATH_FIRED_ALERTS = "alerts/fired_alerts/"
+PATH_INDEXES = "data/indexes/"
+PATH_INPUTS = "data/inputs/"
+PATH_JOBS = "search/jobs/"
+PATH_LOGGER = "/services/server/logger/"
+PATH_MESSAGES = "messages/"
+PATH_MODULAR_INPUTS = "data/modular-inputs"
+PATH_ROLES = "authorization/roles/"
+PATH_SAVED_SEARCHES = "saved/searches/"
+PATH_STANZA = "configs/conf-%s/%s" # (file, stanza)
+PATH_USERS = "authentication/users/"
+PATH_RECEIVERS_STREAM = "receivers/stream"
+PATH_RECEIVERS_SIMPLE = "receivers/simple"
+PATH_STORAGE_PASSWORDS = "storage/passwords"
+
+XNAMEF_ATOM = "{http://www.w3.org/2005/Atom}%s"
+XNAME_ENTRY = XNAMEF_ATOM % "entry"
+XNAME_CONTENT = XNAMEF_ATOM % "content"
+
+MATCH_ENTRY_CONTENT = "%s/%s/*" % (XNAME_ENTRY, XNAME_CONTENT)
+
+
+class IllegalOperationException(Exception):
+    """Thrown when an operation is not possible on the Splunk instance that a
+    :class:`Service` object is connected to."""
+    pass
+
+
+class IncomparableException(Exception):
+    """Thrown when trying to compare objects (using ``==``, ``<``, ``>``, and
+    so on) of a type that doesn't support it."""
+    pass
+
+
+class AmbiguousReferenceException(ValueError):
+    """Thrown when the name used to fetch an entity matches more than one entity."""
+    pass
+
+
+class InvalidNameException(Exception):
+    """Thrown when the specified name contains characters that are not allowed
+    in Splunk entity names."""
+    pass
+
+
+class NoSuchCapability(Exception):
+    """Thrown when the capability that has been referred to doesn't exist."""
+    pass
+
+
+class OperationError(Exception):
+    """Raised for a failed operation, such as a time out."""
+    pass
+
+
+class NotSupportedError(Exception):
+    """Raised for operations that are not supported on a given object."""
+    pass
+
+
+def _trailing(template, *targets):
+    """Substring of *template* following all *targets*.
+
+    **Example**::
+
+        template = "this is a test of the bunnies."
+        _trailing(template, "is", "est", "the") == " bunnies"
+
+    Each target is matched successively in the string, and the string
+    remaining after the last target is returned. If one of the targets
+    fails to match, a ValueError is raised.
+
+    :param template: Template to extract a trailing string from.
+    :type template: ``string``
+    :param targets: Strings to successively match in *template*.
+    :type targets: list of ``string``s
+    :return: Trailing string after all targets are matched.
+    :rtype: ``string``
+    :raises ValueError: Raised when one of the targets does not match.
+    """
+    s = template
+    for t in targets:
+        n = s.find(t)
+        if n == -1:
+            raise ValueError("Target " + t + " not found in template.")
+        s = s[n + len(t):]
+    return s
+
+
+# Filter the given state content record according to the given arg list.
+def _filter_content(content, *args):
+    if len(args) > 0:
+        return record((k, content[k]) for k in args)
+    return record((k, v) for k, v in content.iteritems()
+        if k not in ['eai:acl', 'eai:attributes', 'type'])
+
+# Construct a resource path from the given base path + resource name
+def _path(base, name):
+    if not base.endswith('/'): base = base + '/'
+    return base + name
+
+
+# Load an atom record from the body of the given response
+def _load_atom(response, match=None):
+    return data.load(response.body.read(), match)
+
+
+# Load an array of atom entries from the body of the given response
+def _load_atom_entries(response):
+    r = _load_atom(response)
+    if 'feed' in r:
+        # Need this to handle a random case in the REST API
+        if r.feed.get('totalResults') in [0, '0']:
+            return []
+        entries = r.feed.get('entry', None)
+        if entries is None: return None
+        return entries if isinstance(entries, list) else [entries]
+    # Unlike most other endpoints, the jobs endpoint does not return
+    # its state wrapped in another element, but at the top level.
+    # For example, in XML, it returns <entry>...</entry> instead of
+    # <feed><entry>...</entry></feed>.
+    else:
+        entries = r.get('entry', None)
+        if entries is None: return None
+        return entries if isinstance(entries, list) else [entries]
+
+
+# Load the sid from the body of the given response
+def _load_sid(response):
+    return _load_atom(response).response.sid
+
+
+# Parse the given atom entry record into a generic entity state record
+def _parse_atom_entry(entry):
+    title = entry.get('title', None)
+
+    elink = entry.get('link', [])
+    elink = elink if isinstance(elink, list) else [elink]
+    links = record((link.rel, link.href) for link in elink)
+
+    # Retrieve entity content values
+    content = entry.get('content', {})
+
+    # Host entry metadata
+    metadata = _parse_atom_metadata(content)
+
+    # Filter some of the noise out of the content record
+    content = record((k, v) for k, v in content.iteritems()
+                     if k not in ['eai:acl', 'eai:attributes'])
+
+    if 'type' in content:
+        if isinstance(content['type'], list):
+            content['type'] = [t for t in content['type'] if t != 'text/xml']
+            # Unset type if it was only 'text/xml'
+            if len(content['type']) == 0:
+                content.pop('type', None)
+            # Flatten 1 element list
+            if len(content['type']) == 1:
+                content['type'] = content['type'][0]
+        else:
+            content.pop('type', None)
+
+    return record({
+        'title': title,
+        'links': links,
+        'access': metadata.access,
+        'fields': metadata.fields,
+        'content': content,
+        'updated': entry.get("updated")
+    })
+
+
+# Parse the metadata fields out of the given atom entry content record
+def _parse_atom_metadata(content):
+    # Hoist access metadata
+    access = content.get('eai:acl', None)
+
+    # Hoist content metadata (and cleanup some naming)
+    attributes = content.get('eai:attributes', {})
+    fields = record({
+        'required': attributes.get('requiredFields', []),
+        'optional': attributes.get('optionalFields', []),
+        'wildcard': attributes.get('wildcardFields', [])})
+
+    return record({'access': access, 'fields': fields})
+
+# kwargs: scheme, host, port, app, owner, username, password
+def connect(**kwargs):
+    """This function connects and logs in to a Splunk instance.
+
+    This function is a shorthand for :meth:`Service.login`.
+    The ``connect`` function makes one round trip to the server (for logging in).
+
+    :param host: The host name (the default is "localhost").
+    :type host: ``string``
+    :param port: The port number (the default is 8089).
+    :type port: ``integer``
+    :param scheme: The scheme for accessing the service (the default is "https").
+    :type scheme: "https" or "http"
+    :param `owner`: The owner context of the namespace (optional).
+    :type owner: ``string``
+    :param `app`: The app context of the namespace (optional).
+    :type app: ``string``
+    :param sharing: The sharing mode for the namespace (the default is "user").
+    :type sharing: "global", "system", "app", or "user"
+    :param `token`: The current session token (optional). Session tokens can be
+                    shared across multiple service instances.
+    :type token: ``string``
+    :param cookie: A session cookie. When provided, you don't need to call :meth:`login`.
+        This parameter is only supported for Splunk 6.2+.
+    :type cookie: ``string``
+    :param autologin: When ``True``, automatically tries to log in again if the
+        session terminates.
+    :type autologin: ``boolean``
+    :param `username`: The Splunk account username, which is used to
+                       authenticate the Splunk instance.
+    :type username: ``string``
+    :param `password`: The password for the Splunk account.
+    :type password: ``string``
+    :return: An initialized :class:`Service` connection.
+
+    **Example**::
+
+        import splunklib.client as client
+        s = client.connect(...)
+        a = s.apps["my_app"]
+        ...
+    """
+    s = Service(**kwargs)
+    s.login()
+    return s
+
+
+# In preparation for adding Storm support, we added an
+# intermediary class between Service and Context. Storm's
+# API is not going to be the same as enterprise Splunk's
+# API, so we will derive both Service (for enterprise Splunk)
+# and StormService for (Splunk Storm) from _BaseService, and
+# put any shared behavior on it.
+class _BaseService(Context):
+    pass
+
+
+class Service(_BaseService):
+    """A Pythonic binding to Splunk instances.
+
+    A :class:`Service` represents a binding to a Splunk instance on an
+    HTTP or HTTPS port. It handles the details of authentication, wire
+    formats, and wraps the REST API endpoints into something more
+    Pythonic. All of the low-level operations on the instance from
+    :class:`splunklib.binding.Context` are also available in case you need
+    to do something beyond what is provided by this class.
+
+    After creating a ``Service`` object, you must call its :meth:`login`
+    method before you can issue requests to Splunk.
+    Alternately, use the :func:`connect` function to create an already
+    authenticated :class:`Service` object, or provide a session token
+    when creating the :class:`Service` object explicitly (the same
+    token may be shared by multiple :class:`Service` objects).
+
+    :param host: The host name (the default is "localhost").
+    :type host: ``string``
+    :param port: The port number (the default is 8089).
+    :type port: ``integer``
+    :param scheme: The scheme for accessing the service (the default is "https").
+    :type scheme: "https" or "http"
+    :param `owner`: The owner context of the namespace (optional; use "-" for wildcard).
+    :type owner: ``string``
+    :param `app`: The app context of the namespace (optional; use "-" for wildcard).
+    :type app: ``string``
+    :param `token`: The current session token (optional). Session tokens can be
+                    shared across multiple service instances.
+    :type token: ``string``
+    :param cookie: A session cookie. When provided, you don't need to call :meth:`login`.
+        This parameter is only supported for Splunk 6.2+.
+    :type cookie: ``string``
+    :param `username`: The Splunk account username, which is used to
+                       authenticate the Splunk instance.
+    :type username: ``string``
+    :param `password`: The password, which is used to authenticate the Splunk
+                       instance.
+    :type password: ``string``
+    :return: A :class:`Service` instance.
+
+    **Example**::
+
+        import splunklib.client as client
+        s = client.Service(username="boris", password="natasha", ...)
+        s.login()
+        # Or equivalently
+        s = client.connect(username="boris", password="natasha")
+        # Or if you already have a session token
+        s = client.Service(token="atg232342aa34324a")
+        # Or if you already have a valid cookie
+        s = client.Service(cookie="splunkd_8089=...")
+    """
+    def __init__(self, **kwargs):
+        super(Service, self).__init__(**kwargs)
+        self._splunk_version = None
+
+    @property
+    def apps(self):
+        """Returns the collection of applications that are installed on this instance of Splunk.
+
+        :return: A :class:`Collection` of :class:`Application` entities.
+        """
+        return Collection(self, PATH_APPS, item=Application)
+
+    @property
+    def confs(self):
+        """Returns the collection of configuration files for this Splunk instance.
+
+        :return: A :class:`Configurations` collection of
+            :class:`ConfigurationFile` entities.
+        """
+        return Configurations(self)
+
+    @property
+    def capabilities(self):
+        """Returns the list of system capabilities.
+
+        :return: A ``list`` of capabilities.
+        """
+        response = self.get(PATH_CAPABILITIES)
+        return _load_atom(response, MATCH_ENTRY_CONTENT).capabilities
+
+    @property
+    def event_types(self):
+        """Returns the collection of event types defined in this Splunk instance.
+
+        :return: An :class:`Entity` containing the event types.
+        """
+        return Collection(self, PATH_EVENT_TYPES)
+
+    @property
+    def fired_alerts(self):
+        """Returns the collection of alerts that have been fired on the Splunk
+        instance, grouped by saved search.
+
+        :return: A :class:`Collection` of :class:`AlertGroup` entities.
+        """
+        return Collection(self, PATH_FIRED_ALERTS, item=AlertGroup)
+
+    @property
+    def indexes(self):
+        """Returns the collection of indexes for this Splunk instance.
+
+        :return: An :class:`Indexes` collection of :class:`Index` entities.
+        """
+        return Indexes(self, PATH_INDEXES, item=Index)
+
+    @property
+    def info(self):
+        """Returns the information about this instance of Splunk.
+
+        :return: The system information, as key-value pairs.
+        :rtype: ``dict``
+        """
+        response = self.get("/services/server/info")
+        return _filter_content(_load_atom(response, MATCH_ENTRY_CONTENT))
+
+    @property
+    def inputs(self):
+        """Returns the collection of inputs configured on this Splunk instance.
+
+        :return: An :class:`Inputs` collection of :class:`Input` entities.
+        """
+        return Inputs(self)
+
+    def job(self, sid):
+        """Retrieves a search job by sid.
+
+        :return: A :class:`Job` object.
+        """
+        return Job(self, sid).refresh()
+
+    @property
+    def jobs(self):
+        """Returns the collection of current search jobs.
+
+        :return: A :class:`Jobs` collection of :class:`Job` entities.
+        """
+        return Jobs(self)
+
+    @property
+    def loggers(self):
+        """Returns the collection of logging level categories and their status.
+
+        :return: A :class:`Loggers` collection of logging levels.
+        """
+        return Loggers(self)
+
+    @property
+    def messages(self):
+        """Returns the collection of service messages.
+
+        :return: A :class:`Collection` of :class:`Message` entities.
+        """
+        return Collection(self, PATH_MESSAGES, item=Message)
+
+    @property
+    def modular_input_kinds(self):
+        """Returns the collection of the modular input kinds on this Splunk instance.
+
+        :return: A :class:`ReadOnlyCollection` of :class:`ModularInputKind` entities.
+        """
+        if self.splunk_version >= (5,):
+            return ReadOnlyCollection(self, PATH_MODULAR_INPUTS, item=ModularInputKind)
+        else:
+            raise IllegalOperationException("Modular inputs are not supported before Splunk version 5.")
+
+    @property
+    def storage_passwords(self):
+        """Returns the collection of the storage passwords on this Splunk instance.
+
+        :return: A :class:`ReadOnlyCollection` of :class:`StoragePasswords` entities.
+        """
+        return StoragePasswords(self)
+
+    # kwargs: enable_lookups, reload_macros, parse_only, output_mode
+    def parse(self, query, **kwargs):
+        """Parses a search query and returns a semantic map of the search.
+
+        :param query: The search query to parse.
+        :type query: ``string``
+        :param kwargs: Arguments to pass to the ``search/parser`` endpoint
+            (optional). Valid arguments are:
+
+            * "enable_lookups" (``boolean``): If ``True``, performs reverse lookups
+              to expand the search expression.
+
+            * "output_mode" (``string``): The output format (XML or JSON).
+
+            * "parse_only" (``boolean``): If ``True``, disables the expansion of
+              search due to evaluation of subsearches, time term expansion,
+              lookups, tags, eventtypes, and sourcetype alias.
+
+            * "reload_macros" (``boolean``): If ``True``, reloads macro
+              definitions from macros.conf.
+
+        :type kwargs: ``dict``
+        :return: A semantic map of the parsed search query.
+        """
+        return self.get("search/parser", q=query, **kwargs)
+
+    def restart(self, timeout=None):
+        """Restarts this Splunk instance.
+
+        The service is unavailable until it has successfully restarted.
+
+        If a *timeout* value is specified, ``restart`` blocks until the service
+        resumes or the timeout period has been exceeded. Otherwise, ``restart`` returns
+        immediately.
+
+        :param timeout: A timeout period, in seconds.
+        :type timeout: ``integer``
+        """
+        msg = { "value": "Restart requested by " + self.username + "via the Splunk SDK for Python"}
+        # This message will be deleted once the server actually restarts.
+        self.messages.create(name="restart_required", **msg)
+        result = self.post("/services/server/control/restart")
+        if timeout is None: 
+            return result
+        start = datetime.now()
+        diff = timedelta(seconds=timeout)
+        while datetime.now() - start < diff:
+            try:
+                self.login()
+                if not self.restart_required:
+                    return result
+            except Exception, e:
+                sleep(1)
+        raise Exception, "Operation time out."
+
+    @property
+    def restart_required(self):
+        """Indicates whether splunkd is in a state that requires a restart.
+
+        :return: A ``boolean`` that indicates whether a restart is required.
+
+        """
+        response = self.get("messages").body.read()
+        messages = data.load(response)['feed']
+        if 'entry' not in messages:
+            result = False
+        else:
+            if isinstance(messages['entry'], dict):
+                titles = [messages['entry']['title']]
+            else:
+                titles = [x['title'] for x in messages['entry']]
+            result = 'restart_required' in titles
+        return result
+
+    @property
+    def roles(self):
+        """Returns the collection of user roles.
+
+        :return: A :class:`Roles` collection of :class:`Role` entities.
+        """
+        return Roles(self)
+
+    def search(self, query, **kwargs):
+        """Runs a search using a search query and any optional arguments you
+        provide, and returns a `Job` object representing the search.
+
+        :param query: A search query.
+        :type query: ``string``
+        :param kwargs: Arguments for the search (optional):
+
+            * "output_mode" (``string``): Specifies the output format of the
+              results.
+
+            * "earliest_time" (``string``): Specifies the earliest time in the
+              time range to
+              search. The time string can be a UTC time (with fractional
+              seconds), a relative time specifier (to now), or a formatted
+              time string.
+
+            * "latest_time" (``string``): Specifies the latest time in the time
+              range to
+              search. The time string can be a UTC time (with fractional
+              seconds), a relative time specifier (to now), or a formatted
+              time string.
+
+            * "rf" (``string``): Specifies one or more fields to add to the
+              search.
+
+        :type kwargs: ``dict``
+        :rtype: class:`Job`
+        :returns: An object representing the created job.
+        """
+        return self.jobs.create(query, **kwargs)
+
+    @property
+    def saved_searches(self):
+        """Returns the collection of saved searches.
+
+        :return: A :class:`SavedSearches` collection of :class:`SavedSearch`
+            entities.
+        """
+        return SavedSearches(self)
+
+    @property
+    def settings(self):
+        """Returns the configuration settings for this instance of Splunk.
+
+        :return: A :class:`Settings` object containing configuration settings.
+        """
+        return Settings(self)
+
+    @property
+    def splunk_version(self):
+        """Returns the version of the splunkd instance this object is attached
+        to.
+
+        The version is returned as a tuple of the version components as
+        integers (for example, `(4,3,3)` or `(5,)`).
+
+        :return: A ``tuple`` of ``integers``.
+        """
+        if self._splunk_version is None:
+            self._splunk_version = tuple([int(p) for p in self.info['version'].split('.')])
+        return self._splunk_version
+
+    @property
+    def users(self):
+        """Returns the collection of users.
+
+        :return: A :class:`Users` collection of :class:`User` entities.
+        """
+        return Users(self)
+
+
+class Endpoint(object):
+    """This class represents individual Splunk resources in the Splunk REST API.
+
+    An ``Endpoint`` object represents a URI, such as ``/services/saved/searches``.
+    This class provides the common functionality of :class:`Collection` and
+    :class:`Entity` (essentially HTTP GET and POST methods).
+    """
+    def __init__(self, service, path):
+        self.service = service
+        self.path = path if path.endswith('/') else path + '/'
+
+    def get(self, path_segment="", owner=None, app=None, sharing=None, **query):
+        """Performs a GET operation on the path segment relative to this endpoint.
+
+        This method is named to match the HTTP method. This method makes at least
+        one roundtrip to the server, one additional round trip for
+        each 303 status returned, plus at most two additional round
+        trips if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        If *owner*, *app*, and *sharing* are omitted, this method takes a
+        default namespace from the :class:`Service` object for this :class:`Endpoint`.
+        All other keyword arguments are included in the URL as query parameters.
+
+        :raises AuthenticationError: Raised when the ``Service`` is not logged in.
+        :raises HTTPError: Raised when an error in the request occurs.
+        :param path_segment: A path segment relative to this endpoint.
+        :type path_segment: ``string``
+        :param owner: The owner context of the namespace (optional).
+        :type owner: ``string``
+        :param app: The app context of the namespace (optional).
+        :type app: ``string``
+        :param sharing: The sharing mode for the namespace (optional).
+        :type sharing: "global", "system", "app", or "user"
+        :param query: All other keyword arguments, which are used as query
+            parameters.
+        :type query: ``string``
+        :return: The response from the server.
+        :rtype: ``dict`` with keys ``body``, ``headers``, ``reason``,
+                and ``status``
+
+        **Example**::
+
+            import splunklib.client
+            s = client.service(...)
+            apps = s.apps
+            apps.get() == \\
+                {'body': ...a response reader object...,
+                 'headers': [('content-length', '26208'),
+                             ('expires', 'Fri, 30 Oct 1998 00:00:00 GMT'),
+                             ('server', 'Splunkd'),
+                             ('connection', 'close'),
+                             ('cache-control', 'no-store, max-age=0, must-revalidate, no-cache'),
+                             ('date', 'Fri, 11 May 2012 16:30:35 GMT'),
+                             ('content-type', 'text/xml; charset=utf-8')],
+                 'reason': 'OK',
+                 'status': 200}
+            apps.get('nonexistant/path') # raises HTTPError
+            s.logout()
+            apps.get() # raises AuthenticationError
+        """
+        # self.path to the Endpoint is relative in the SDK, so passing
+        # owner, app, sharing, etc. along will produce the correct
+        # namespace in the final request.
+        if path_segment.startswith('/'):
+            path = path_segment
+        else:
+            path = self.service._abspath(self.path + path_segment, owner=owner,
+                                         app=app, sharing=sharing)
+        # ^-- This was "%s%s" % (self.path, path_segment).
+        # That doesn't work, because self.path may be UrlEncoded.
+        return self.service.get(path,
+                                owner=owner, app=app, sharing=sharing,
+                                **query)
+
+    def post(self, path_segment="", owner=None, app=None, sharing=None, **query):
+        """Performs a POST operation on the path segment relative to this endpoint.
+
+        This method is named to match the HTTP method. This method makes at least
+        one roundtrip to the server, one additional round trip for
+        each 303 status returned, plus at most two additional round trips if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        If *owner*, *app*, and *sharing* are omitted, this method takes a
+        default namespace from the :class:`Service` object for this :class:`Endpoint`.
+        All other keyword arguments are included in the URL as query parameters.
+
+        :raises AuthenticationError: Raised when the ``Service`` is not logged in.
+        :raises HTTPError: Raised when an error in the request occurs.
+        :param path_segment: A path segment relative to this endpoint.
+        :type path_segment: ``string``
+        :param owner: The owner context of the namespace (optional).
+        :type owner: ``string``
+        :param app: The app context of the namespace (optional).
+        :type app: ``string``
+        :param sharing: The sharing mode of the namespace (optional).
+        :type sharing: ``string``
+        :param query: All other keyword arguments, which are used as query
+            parameters.
+        :type query: ``string``
+        :return: The response from the server.
+        :rtype: ``dict`` with keys ``body``, ``headers``, ``reason``,
+                and ``status``
+
+        **Example**::
+
+            import splunklib.client
+            s = client.service(...)
+            apps = s.apps
+            apps.post(name='boris') == \\
+                {'body': ...a response reader object...,
+                 'headers': [('content-length', '2908'),
+                             ('expires', 'Fri, 30 Oct 1998 00:00:00 GMT'),
+                             ('server', 'Splunkd'),
+                             ('connection', 'close'),
+                             ('cache-control', 'no-store, max-age=0, must-revalidate, no-cache'),
+                             ('date', 'Fri, 11 May 2012 18:34:50 GMT'),
+                             ('content-type', 'text/xml; charset=utf-8')],
+                 'reason': 'Created',
+                 'status': 201}
+            apps.get('nonexistant/path') # raises HTTPError
+            s.logout()
+            apps.get() # raises AuthenticationError
+        """
+        if path_segment.startswith('/'):
+            path = path_segment
+        else:
+            path = self.service._abspath(self.path + path_segment, owner=owner, app=app, sharing=sharing)
+        return self.service.post(path, owner=owner, app=app, sharing=sharing, **query)
+
+
+# kwargs: path, app, owner, sharing, state
+class Entity(Endpoint):
+    """This class is a base class for Splunk entities in the REST API, such as
+    saved searches, jobs, indexes, and inputs.
+
+    ``Entity`` provides the majority of functionality required by entities.
+    Subclasses only implement the special cases for individual entities.
+    For example for deployment serverclasses, the subclass makes whitelists and
+    blacklists into Python lists.
+
+    An ``Entity`` is addressed like a dictionary, with a few extensions,
+    so the following all work::
+
+        ent['email.action']
+        ent['disabled']
+        ent['whitelist']
+
+    Many endpoints have values that share a prefix, such as
+    ``email.to``, ``email.action``, and ``email.subject``. You can extract
+    the whole fields, or use the key ``email`` to get a dictionary of
+    all the subelements. That is, ``ent['email']`` returns a
+    dictionary with the keys ``to``, ``action``, ``subject``, and so on. If
+    there are multiple levels of dots, each level is made into a
+    subdictionary, so ``email.body.salutation`` can be accessed at
+    ``ent['email']['body']['salutation']`` or
+    ``ent['email.body.salutation']``.
+
+    You can also access the fields as though they were the fields of a Python
+    object, as in::
+
+        ent.email.action
+        ent.disabled
+        ent.whitelist
+
+    However, because some of the field names are not valid Python identifiers,
+    the dictionary-like syntax is preferrable.
+
+    The state of an :class:`Entity` object is cached, so accessing a field
+    does not contact the server. If you think the values on the
+    server have changed, call the :meth:`Entity.refresh` method.
+    """
+    # Not every endpoint in the API is an Entity or a Collection. For
+    # example, a saved search at saved/searches/{name} has an additional
+    # method saved/searches/{name}/scheduled_times, but this isn't an
+    # entity in its own right. In these cases, subclasses should
+    # implement a method that uses the get and post methods inherited
+    # from Endpoint, calls the _load_atom function (it's elsewhere in
+    # client.py, but not a method of any object) to read the
+    # information, and returns the extracted data in a Pythonesque form.
+    #
+    # The primary use of subclasses of Entity is to handle specially
+    # named fields in the Entity. If you only need to provide a default
+    # value for an optional field, subclass Entity and define a
+    # dictionary ``defaults``. For instance,::
+    #
+    #     class Hypothetical(Entity):
+    #         defaults = {'anOptionalField': 'foo',
+    #                     'anotherField': 'bar'}
+    #
+    # If you have to do more than provide a default, such as rename or
+    # actually process values, then define a new method with the
+    # ``@property`` decorator.
+    #
+    #     class Hypothetical(Entity):
+    #         @property
+    #         def foobar(self):
+    #             return self.content['foo'] + "-" + self.content["bar"]
+
+    # Subclasses can override defaults the default values for
+    # optional fields. See above.
+    defaults = {}
+
+    def __init__(self, service, path, **kwargs):
+        Endpoint.__init__(self, service, path)
+        self._state = None
+        if not kwargs.get('skip_refresh', False):
+            self.refresh(kwargs.get('state', None))  # "Prefresh"
+        return
+
+    def __contains__(self, item):
+        try:
+            self[item]
+            return True
+        except KeyError:
+            return False
+
+    def __eq__(self, other):
+        """Raises IncomparableException.
+
+        Since Entity objects are snapshots of times on the server, no
+        simple definition of equality will suffice beyond instance
+        equality, and instance equality leads to strange situations
+        such as::
+
+            import splunklib.client as client
+            c = client.connect(...)
+            saved_searches = c.saved_searches
+            x = saved_searches['asearch']
+
+        but then ``x != saved_searches['asearch']``.
+
+        whether or not there was a change on the server. Rather than
+        try to do something fancy, we simple declare that equality is
+        undefined for Entities.
+
+        Makes no roundtrips to the server.
+        """
+        raise IncomparableException(
+            "Equality is undefined for objects of class %s" % \
+                self.__class__.__name__)
+
+    def __getattr__(self, key):
+        # Called when an attribute was not found by the normal method. In this
+        # case we try to find it in self.content and then self.defaults.
+        if key in self.state.content:
+            return self.state.content[key]
+        elif key in self.defaults:
+            return self.defaults[key]
+        else:
+            raise AttributeError(key)
+
+    def __getitem__(self, key):
+        # getattr attempts to find a field on the object in the normal way,
+        # then calls __getattr__ if it cannot.
+        return getattr(self, key)
+
+    # Load the Atom entry record from the given response - this is a method
+    # because the "entry" record varies slightly by entity and this allows
+    # for a subclass to override and handle any special cases.
+    def _load_atom_entry(self, response):
+        elem = _load_atom(response, XNAME_ENTRY)
+        if isinstance(elem, list):
+            raise AmbiguousReferenceException("Fetch from server returned multiple entries for name %s." % self.name)
+        else:
+            return elem.entry
+
+    # Load the entity state record from the given response
+    def _load_state(self, response):
+        entry = self._load_atom_entry(response)
+        return _parse_atom_entry(entry)
+
+    def _run_action(self, path_segment, **kwargs):
+        """Run a method and return the content Record from the returned XML.
+
+        A method is a relative path from an Entity that is not itself
+        an Entity. _run_action assumes that the returned XML is an
+        Atom field containing one Entry, and the contents of Entry is
+        what should be the return value. This is right in enough cases
+        to make this method useful.
+        """
+        response = self.get(path_segment, **kwargs)
+        data = self._load_atom_entry(response)
+        rec = _parse_atom_entry(data)
+        return rec.content
+
+    def _proper_namespace(self, owner=None, app=None, sharing=None):
+        """Produce a namespace sans wildcards for use in entity requests.
+
+        This method tries to fill in the fields of the namespace which are `None`
+        or wildcard (`'-'`) from the entity's namespace. If that fails, it uses
+        the service's namespace.
+
+        :param owner:
+        :param app:
+        :param sharing:
+        :return:
+        """
+        if owner is None and app is None and sharing is None: # No namespace provided
+            if self._state is not None and 'access' in self._state:
+                return (self._state.access.owner,
+                        self._state.access.app,
+                        self._state.access.sharing)
+            else:
+                return (self.service.namespace['owner'],
+                        self.service.namespace['app'],
+                        self.service.namespace['sharing'])
+        else:
+            return (owner,app,sharing)
+
+    def delete(self):
+        owner, app, sharing = self._proper_namespace()
+        return self.service.delete(self.path, owner=owner, app=app, sharing=sharing)
+
+    def get(self, path_segment="", owner=None, app=None, sharing=None, **query):
+        owner, app, sharing = self._proper_namespace(owner, app, sharing)
+        return super(Entity, self).get(path_segment, owner=owner, app=app, sharing=sharing, **query)
+
+    def post(self, path_segment="", owner=None, app=None, sharing=None, **query):
+        owner, app, sharing = self._proper_namespace(owner, app, sharing)
+        return super(Entity, self).post(path_segment, owner=owner, app=app, sharing=sharing, **query)
+
+    def refresh(self, state=None):
+        """Refreshes the state of this entity.
+
+        If *state* is provided, load it as the new state for this
+        entity. Otherwise, make a roundtrip to the server (by calling
+        the :meth:`read` method of ``self``) to fetch an updated state,
+        plus at most two additional round trips if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        :param state: Entity-specific arguments (optional).
+        :type state: ``dict``
+        :raises EntityDeletedException: Raised if the entity no longer exists on
+            the server.
+
+        **Example**::
+
+            import splunklib.client as client
+            s = client.connect(...)
+            search = s.apps['search']
+            search.refresh()
+        """
+        if state is not None:
+            self._state = state
+        else:
+            self._state = self.read(self.get())
+        return self
+
+    @property
+    def access(self):
+        """Returns the access metadata for this entity.
+
+        :return: A :class:`splunklib.data.Record` object with three keys:
+            ``owner``, ``app``, and ``sharing``.
+        """
+        return self.state.access
+
+    @property
+    def content(self):
+        """Returns the contents of the entity.
+
+        :return: A ``dict`` containing values.
+        """
+        return self.state.content
+
+    def disable(self):
+        """Disables the entity at this endpoint."""
+        self.post("disable")
+        if self.service.restart_required:
+            self.service.restart(120)
+        return self
+
+    def enable(self):
+        """Enables the entity at this endpoint."""
+        self.post("enable")
+        return self
+
+    @property
+    def fields(self):
+        """Returns the content metadata for this entity.
+
+        :return: A :class:`splunklib.data.Record` object with three keys:
+            ``required``, ``optional``, and ``wildcard``.
+        """
+        return self.state.fields
+
+    @property
+    def links(self):
+        """Returns a dictionary of related resources.
+
+        :return: A ``dict`` with keys and corresponding URLs.
+        """
+        return self.state.links
+
+    @property
+    def name(self):
+        """Returns the entity name.
+
+        :return: The entity name.
+        :rtype: ``string``
+        """
+        return self.state.title
+
+    def read(self, response):
+        """ Reads the current state of the entity from the server. """
+        results = self._load_state(response)
+        # In lower layers of the SDK, we end up trying to URL encode
+        # text to be dispatched via HTTP. However, these links are already
+        # URL encoded when they arrive, and we need to mark them as such.
+        unquoted_links = dict([(k, UrlEncoded(v, skip_encode=True))
+                               for k,v in results['links'].iteritems()])
+        results['links'] = unquoted_links
+        return results
+
+    def reload(self):
+        """Reloads the entity."""
+        self.post("_reload")
+        return self
+
+    @property
+    def state(self):
+        """Returns the entity's state record.
+
+        :return: A ``dict`` containing fields and metadata for the entity.
+        """
+        if self._state is None: self.refresh()
+        return self._state
+
+    def update(self, **kwargs):
+        """Updates the server with any changes you've made to the current entity
+        along with any additional arguments you specify.
+
+            **Note**: You cannot update the ``name`` field of an entity.
+
+        Many of the fields in the REST API are not valid Python
+        identifiers, which means you cannot pass them as keyword
+        arguments. That is, Python will fail to parse the following::
+
+            # This fails
+            x.update(check-new=False, email.to='boris@utopia.net')
+
+        However, you can always explicitly use a dictionary to pass
+        such keys::
+
+            # This works
+            x.update(**{'check-new': False, 'email.to': 'boris@utopia.net'})
+
+        :param kwargs: Additional entity-specific arguments (optional).
+        :type kwargs: ``dict``
+
+        :return: The entity this method is called on.
+        :rtype: class:`Entity`
+        """
+        # The peculiarity in question: the REST API creates a new
+        # Entity if we pass name in the dictionary, instead of the
+        # expected behavior of updating this Entity. Therefore we
+        # check for 'name' in kwargs and throw an error if it is
+        # there.
+        if 'name' in kwargs:
+            raise IllegalOperationException('Cannot update the name of an Entity via the REST API.')
+        self.post(**kwargs)
+        return self
+
+
+class ReadOnlyCollection(Endpoint):
+    """This class represents a read-only collection of entities in the Splunk
+    instance.
+    """
+    def __init__(self, service, path, item=Entity):
+        Endpoint.__init__(self, service, path)
+        self.item = item # Item accessor
+        self.null_count = -1
+
+    def __contains__(self, name):
+        """Is there at least one entry called *name* in this collection?
+
+        Makes a single roundtrip to the server, plus at most two more
+        if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+        """
+        try:
+            self[name]
+            return True
+        except KeyError:
+            return False
+        except AmbiguousReferenceException:
+            return True
+
+    def __getitem__(self, key):
+        """Fetch an item named *key* from this collection.
+
+        A name is not a unique identifier in a collection. The unique
+        identifier is a name plus a namespace. For example, there can
+        be a saved search named ``'mysearch'`` with sharing ``'app'``
+        in application ``'search'``, and another with sharing
+        ``'user'`` with owner ``'boris'`` and application
+        ``'search'``. If the ``Collection`` is attached to a
+        ``Service`` that has ``'-'`` (wildcard) as user and app in its
+        namespace, then both of these may be visible under the same
+        name.
+
+        Where there is no conflict, ``__getitem__`` will fetch the
+        entity given just the name. If there is a conflict and you
+        pass just a name, it will raise a ``ValueError``. In that
+        case, add the namespace as a second argument.
+
+        This function makes a single roundtrip to the server, plus at
+        most two additional round trips if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        :param key: The name to fetch, or a tuple (name, namespace).
+        :return: An :class:`Entity` object.
+        :raises KeyError: Raised if *key* does not exist.
+        :raises ValueError: Raised if no namespace is specified and *key*
+                            does not refer to a unique name.
+
+        *Example*::
+
+            s = client.connect(...)
+            saved_searches = s.saved_searches
+            x1 = saved_searches.create(
+                'mysearch', 'search * | head 1',
+                owner='admin', app='search', sharing='app')
+            x2 = saved_searches.create(
+                'mysearch', 'search * | head 1',
+                owner='admin', app='search', sharing='user')
+            # Raises ValueError:
+            saved_searches['mysearch']
+            # Fetches x1
+            saved_searches[
+                'mysearch',
+                client.namespace(sharing='app', app='search')]
+            # Fetches x2
+            saved_searches[
+                'mysearch',
+                client.namespace(sharing='user', owner='boris', app='search')]
+        """
+        try:
+            if isinstance(key, tuple) and len(key) == 2:
+                # x[a,b] is translated to x.__getitem__( (a,b) ), so we
+                # have to extract values out.
+                key, ns = key
+                key = UrlEncoded(key, encode_slash=True)
+                response = self.get(key, owner=ns.owner, app=ns.app)
+            else:
+                key = UrlEncoded(key, encode_slash=True)
+                response = self.get(key)
+            entries = self._load_list(response)
+            if len(entries) > 1:
+                raise AmbiguousReferenceException("Found multiple entities named '%s'; please specify a namespace." % key)
+            elif len(entries) == 0:
+                raise KeyError(key)
+            else:
+                return entries[0]
+        except HTTPError as he:
+            if he.status == 404: # No entity matching key and namespace.
+                raise KeyError(key)
+            else:
+                raise
+
+    def __iter__(self, **kwargs):
+        """Iterate over the entities in the collection.
+
+        :param kwargs: Additional arguments.
+        :type kwargs: ``dict``
+        :rtype: iterator over entities.
+
+        Implemented to give Collection a listish interface. This
+        function always makes a roundtrip to the server, plus at most
+        two additional round trips if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        **Example**::
+
+            import splunklib.client as client
+            c = client.connect(...)
+            saved_searches = c.saved_searches
+            for entity in saved_searches:
+                print "Saved search named %s" % entity.name
+        """
+
+        for item in self.iter(**kwargs):
+            yield item
+
+    def __len__(self):
+        """Enable ``len(...)`` for ``Collection`` objects.
+
+        Implemented for consistency with a listish interface. No
+        further failure modes beyond those possible for any method on
+        an Endpoint.
+
+        This function always makes a round trip to the server, plus at
+        most two additional round trips if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        **Example**::
+
+            import splunklib.client as client
+            c = client.connect(...)
+            saved_searches = c.saved_searches
+            n = len(saved_searches)
+        """
+        return len(self.list())
+
+    def _entity_path(self, state):
+        """Calculate the path to an entity to be returned.
+
+        *state* should be the dictionary returned by
+        :func:`_parse_atom_entry`. :func:`_entity_path` extracts the
+        link to this entity from *state*, and strips all the namespace
+        prefixes from it to leave only the relative path of the entity
+        itself, sans namespace.
+
+        :rtype: ``string``
+        :return: an absolute path
+        """
+        # This has been factored out so that it can be easily
+        # overloaded by Configurations, which has to switch its
+        # entities' endpoints from its own properties/ to configs/.
+        raw_path = urllib.unquote(state.links.alternate)
+        if 'servicesNS/' in raw_path:
+            return _trailing(raw_path, 'servicesNS/', '/', '/')
+        elif 'services/' in raw_path:
+            return _trailing(raw_path, 'services/')
+        else:
+            return raw_path
+
+    def _load_list(self, response):
+        """Converts *response* to a list of entities.
+
+        *response* is assumed to be a :class:`Record` containing an
+        HTTP response, of the form::
+
+            {'status': 200,
+             'headers': [('content-length', '232642'),
+                         ('expires', 'Fri, 30 Oct 1998 00:00:00 GMT'),
+                         ('server', 'Splunkd'),
+                         ('connection', 'close'),
+                         ('cache-control', 'no-store, max-age=0, must-revalidate, no-cache'),
+                         ('date', 'Tue, 29 May 2012 15:27:08 GMT'),
+                         ('content-type', 'text/xml; charset=utf-8')],
+             'reason': 'OK',
+             'body': ...a stream implementing .read()...}
+
+        The ``'body'`` key refers to a stream containing an Atom feed,
+        that is, an XML document with a toplevel element ``<feed>``,
+        and within that element one or more ``<entry>`` elements.
+        """
+        # Some subclasses of Collection have to override this because
+        # splunkd returns something that doesn't match
+        # <feed><entry></entry><feed>.
+        entries = _load_atom_entries(response)
+        if entries is None: return []
+        entities = []
+        for entry in entries:
+            state = _parse_atom_entry(entry)
+            entity = self.item(
+                self.service,
+                self._entity_path(state),
+                state=state)
+            entities.append(entity)
+
+        return entities
+
+    def itemmeta(self):
+        """Returns metadata for members of the collection.
+
+        Makes a single roundtrip to the server, plus two more at most if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        :return: A :class:`splunklib.data.Record` object containing the metadata.
+
+        **Example**::
+
+            import splunklib.client as client
+            import pprint
+            s = client.connect(...)
+            pprint.pprint(s.apps.itemmeta())
+            {'access': {'app': 'search',
+                                    'can_change_perms': '1',
+                                    'can_list': '1',
+                                    'can_share_app': '1',
+                                    'can_share_global': '1',
+                                    'can_share_user': '1',
+                                    'can_write': '1',
+                                    'modifiable': '1',
+                                    'owner': 'admin',
+                                    'perms': {'read': ['*'], 'write': ['admin']},
+                                    'removable': '0',
+                                    'sharing': 'user'},
+             'fields': {'optional': ['author',
+                                        'configured',
+                                        'description',
+                                        'label',
+                                        'manageable',
+                                        'template',
+                                        'visible'],
+                                        'required': ['name'], 'wildcard': []}}
+        """
+        response = self.get("_new")
+        content = _load_atom(response, MATCH_ENTRY_CONTENT)
+        return _parse_atom_metadata(content)
+
+    def iter(self, offset=0, count=None, pagesize=None, **kwargs):
+        """Iterates over the collection.
+
+        This method is equivalent to the :meth:`list` method, but
+        it returns an iterator and can load a certain number of entities at a
+        time from the server.
+
+        :param offset: The index of the first entity to return (optional).
+        :type offset: ``integer``
+        :param count: The maximum number of entities to return (optional).
+        :type count: ``integer``
+        :param pagesize: The number of entities to load (optional).
+        :type pagesize: ``integer``
+        :param kwargs: Additional arguments (optional):
+
+            - "search" (``string``): The search query to filter responses.
+
+            - "sort_dir" (``string``): The direction to sort returned items:
+              "asc" or "desc".
+
+            - "sort_key" (``string``): The field to use for sorting (optional).
+
+            - "sort_mode" (``string``): The collating sequence for sorting
+              returned items: "auto", "alpha", "alpha_case", or "num".
+
+        :type kwargs: ``dict``
+
+        **Example**::
+
+            import splunklib.client as client
+            s = client.connect(...)
+            for saved_search in s.saved_searches.iter(pagesize=10):
+                # Loads 10 saved searches at a time from the
+                # server.
+                ...
+        """
+        assert pagesize is None or pagesize > 0
+        if count is None:
+            count = self.null_count
+        fetched = 0
+        while count == self.null_count or fetched < count:
+            response = self.get(count=pagesize or count, offset=offset, **kwargs)
+            items = self._load_list(response)
+            N = len(items)
+            fetched += N
+            for item in items:
+                yield item
+            if pagesize is None or N < pagesize:
+                break
+            offset += N
+            logging.debug("pagesize=%d, fetched=%d, offset=%d, N=%d, kwargs=%s", pagesize, fetched, offset, N, kwargs)
+
+    # kwargs: count, offset, search, sort_dir, sort_key, sort_mode
+    def list(self, count=None, **kwargs):
+        """Retrieves a list of entities in this collection.
+
+        The entire collection is loaded at once and is returned as a list. This
+        function makes a single roundtrip to the server, plus at most two more if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+        There is no caching--every call makes at least one round trip.
+
+        :param count: The maximum number of entities to return (optional).
+        :type count: ``integer``
+        :param kwargs: Additional arguments (optional):
+
+            - "offset" (``integer``): The offset of the first item to return.
+
+            - "search" (``string``): The search query to filter responses.
+
+            - "sort_dir" (``string``): The direction to sort returned items:
+              "asc" or "desc".
+
+            - "sort_key" (``string``): The field to use for sorting (optional).
+
+            - "sort_mode" (``string``): The collating sequence for sorting
+              returned items: "auto", "alpha", "alpha_case", or "num".
+
+        :type kwargs: ``dict``
+        :return: A ``list`` of entities.
+        """
+        # response = self.get(count=count, **kwargs)
+        # return self._load_list(response)
+        return list(self.iter(count=count, **kwargs))
+
+
+
+
+class Collection(ReadOnlyCollection):
+    """A collection of entities.
+
+    Splunk provides a number of different collections of distinct
+    entity types: applications, saved searches, fired alerts, and a
+    number of others. Each particular type is available separately
+    from the Splunk instance, and the entities of that type are
+    returned in a :class:`Collection`.
+
+    The interface for :class:`Collection` does not quite match either
+    ``list`` or ``dict`` in Python, because there are enough semantic
+    mismatches with either to make its behavior surprising. A unique
+    element in a :class:`Collection` is defined by a string giving its
+    name plus namespace (although the namespace is optional if the name is
+    unique).
+
+    **Example**::
+
+        import splunklib.client as client
+        service = client.connect(...)
+        mycollection = service.saved_searches
+        mysearch = mycollection['my_search', client.namespace(owner='boris', app='natasha', sharing='user')]
+        # Or if there is only one search visible named 'my_search'
+        mysearch = mycollection['my_search']
+
+    Similarly, ``name`` in ``mycollection`` works as you might expect (though
+    you cannot currently pass a namespace to the ``in`` operator), as does
+    ``len(mycollection)``.
+
+    However, as an aggregate, :class:`Collection` behaves more like a
+    list. If you iterate over a :class:`Collection`, you get an
+    iterator over the entities, not the names and namespaces.
+
+    **Example**::
+
+        for entity in mycollection:
+            assert isinstance(entity, client.Entity)
+
+    Use the :meth:`create` and :meth:`delete` methods to create and delete
+    entities in this collection. To view the access control list and other
+    metadata of the collection, use the :meth:`ReadOnlyCollection.itemmeta` method.
+
+    :class:`Collection` does no caching. Each call makes at least one
+    round trip to the server to fetch data.
+    """
+
+    def create(self, name, **params):
+        """Creates a new entity in this collection.
+
+        This function makes either one or two roundtrips to the
+        server, depending on the type of entities in this
+        collection, plus at most two more if
+        the ``autologin`` field of :func:`connect` is set to ``True``.
+
+        :param name: The name of the entity to create.
+        :type name: ``string``
+        :param namespace: A namespace, as created by the :func:`splunklib.binding.namespace`
+            function (optional).  You can also set ``owner``, ``app``, and
+            ``sharing`` in ``params``.
+        :type namespace: A :class:`splunklib.data.Record` object with keys ``owner``, ``app``,
+            and ``sharing``.
+        :param params: Additional entity-specific arguments (optional).
+        :type params: ``dict``
+        :return: The new entity.
+        :rtype: A subclass of :class:`Entity`, chosen by :meth:`Collection.self.item`.
+
+        **Example**::
+
+            import splunklib.client as client
+            s = client.connect(...)
+            applications = s.apps
+            new_app = applications.create("my_fake_app")
+        """
+        if not isinstance(name, basestring):
+            raise InvalidNameException("%s is not a valid name for an entity." % name)
+        if 'namespace' in params:
+            namespace = params.pop('namespace')
+            params['owner'] = namespace.owner
+            params['app'] = namespace.app
+            params['sharing'] = namespace.sharing
+        response = self.post(name=name, **params)
+        atom = _load_atom(response, XNAME_ENTRY)
+        if atom is None:
+            # This endpoint doesn't return the content of the new
+            # item. We have to go fetch it ourselves.
+            return self[name]
+        else:
+            entry = atom.entry
+            state = _parse_atom_entry(entry)
+            entity = self.item(
+                self.service,
+                self._entity_path(state),
+                state=state)
+            return entity
+
+    def delete(self, name, **params):
+        """Deletes a specified entity from the collection.
+
+        :param name: The name of the entity to delete.
+        :type name: ``string``
+        :return: The collection.
+        :rtype: ``self``
+
+        This method is implemented for consistency with the REST API's DELETE
+        method.
+
+        If there is no *name* entity on the server, a ``KeyError`` is
+        thrown. This function always makes a roundtrip to the server.
+
+        **Example**::
+
+            import splunklib.client as client
+            c = client.connect(...)
+            saved_searches = c.saved_searches
+            saved_searches.create('my_saved_search',
+                                  'search * | head 1')
+            assert 'my_saved_search' in saved_searches
+            saved_searches.delete('my_saved_search')
+            assert 'my_saved_search' not in saved_searches
+        """
+        name = UrlEncoded(name, encode_slash=True)
+        if 'namespace' in params:
+            namespace = params.pop('namespace')
+            params['owner'] = namespace.owner
+            params['app'] = namespace.app
+            params['sharing'] = namespace.sharing
+        try:
+            self.service.delete(_path(self.path, name), **params)
+        except HTTPError as he:
+            # An HTTPError with status code 404 means that the entity
+            # has already been deleted, and we reraise it as a
+            # KeyError.
+            if he.status == 404:
+                raise KeyError("No such entity %s" % name)
+            else:
+                raise
+        return self
+
+    def get(self, name="", owner=None, app=None, sharing=None, **query):
+        """Performs a GET request to the server on the collection.
+
+        If *owner*, *app*, and *sharing* are omitted, this method takes a
+        default namespace from the :class:`Service` object for this :class:`Endpoint`.
+        All other keyword arguments are included in the URL as query parameters.
+
+        :raises AuthenticationError: Raised when the ``Service`` is not logged in.
+        :raises HTTPError: Raised when an error in the request occurs.
+        :param path_segment: A path segment relative to this endpoint.
+        :type path_segment: ``string``
+        :param owner: The owner context of the namespace (optional).
+        :type owner: ``string``
+        :param app: The app context of the namespace (optional).
+        :type app: ``string``
+        :param sharing: The sharing mode for the namespace (optional).
+        :type sharing: "global", "system", "app", or "user"
+        :param query: All other keyword arguments, which are used as query
+            parameters.
+        :type query: ``string``
+        :return: The response from the server.
+        :rtype: ``dict`` with keys ``body``, ``headers``, ``reason``,
+                and ``status``
+
+        Example:
+        
+        import splunklib.client
+            s = client.service(...)
+            saved_searches = s.saved_searches
+            saved_searches.get("my/saved/search") == \\
+                {'body': ...a response reader object...,
+                 'headers': [('content-length', '26208'),
+                             ('expires', 'Fri, 30 Oct 1998 00:00:00 GMT'),
+                             ('server', 'Splunkd'),
+                             ('connection', 'close'),
+                             ('cache-control', 'no-store, max-age=0, must-revalidate, no-cache'),
+                             ('date', 'Fri, 11 May 2012 16:30:35 GMT'),
+                             ('content-type', 'text/xml; charset=utf-8')],
+                 'reason': 'OK',
+                 'status': 200}
+            saved_searches.get('nonexistant/search') # raises HTTPError
+            s.logout()
+            saved_searches.get() # raises AuthenticationError
+
+        """
+        name = UrlEncoded(name, encode_slash=True)
+        return super(Collection, self).get(name, owner, app, sharing, **query)
+
+
+
+
+class ConfigurationFile(Collection):
+    """This class contains all of the stanzas from one configuration file.
+    """
+    # __init__'s arguments must match those of an Entity, not a
+    # Collection, since it is being created as the elements of a
+    # Configurations, which is a Collection subclass.
+    def __init__(self, service, path, **kwargs):
+        Collection.__init__(self, service, path, item=Stanza)
+        self.name = kwargs['state']['title']
+
+
+class Configurations(Collection):
+    """This class provides access to the configuration files from this Splunk
+    instance. Retrieve this collection using :meth:`Service.confs`.
+
+    Splunk's configuration is divided into files, and each file into
+    stanzas. This collection is unusual in that the values in it are
+    themselves collections of :class:`ConfigurationFile` objects.
+    """
+    def __init__(self, service):
+        Collection.__init__(self, service, PATH_PROPERTIES, item=ConfigurationFile)
+        if self.service.namespace.owner == '-' or self.service.namespace.app == '-':
+            raise ValueError("Configurations cannot have wildcards in namespace.")
+
+    def __getitem__(self, key):
+        # The superclass implementation is designed for collections that contain
+        # entities. This collection (Configurations) contains collections
+        # (ConfigurationFile).
+        # 
+        # The configurations endpoint returns multiple entities when we ask for a single file.
+        # This 
