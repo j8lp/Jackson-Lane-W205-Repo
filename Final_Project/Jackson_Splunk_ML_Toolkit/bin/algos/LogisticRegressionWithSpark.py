@@ -12,9 +12,6 @@ import pandas as pd
 import numpy as np
 
 #Import the Apache Spark libraries
-f  = open("/home/splunk/test.txt","w")
-print(os.environ,file=f)
-f.close()
 os.environ['SPARK_HOME'] = os.environ['HOME']+'/spark15'
 sys.path.append(os.environ['SPARK_HOME'] + '/python')
 sys.path.append(os.environ['SPARK_HOME'] + '/python/lib/py4j-0.8.2.1-src.zip')
