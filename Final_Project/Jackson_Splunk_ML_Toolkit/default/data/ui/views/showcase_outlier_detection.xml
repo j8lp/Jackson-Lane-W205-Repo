@@ -1,0 +1,89 @@
+<form script="runPageScript.js">
+  <label>Detect Numeric Outliers</label>
+  <description>Find values that are far from previous values.</description>
+  <fieldset autoRun="false" submitButton="false">
+    <html>
+      <label>Choose an example dataset or enter a search</label>
+      <div class="app-datasource-controls-wrapper">
+        <div class="app-sample-search-control">
+          <div id="sampleSearchesControl"></div>
+        </div>
+        <div class="app-search-controls-wrapper">
+          <div id="searchBarControl"></div>
+          <div id="searchControlsControl"></div>
+        </div>
+      </div>
+      <br />
+      <div class="input input-dropdown splunk-view">
+        <label>Field to analyze</label>
+        <div id="outlierVariableControl"></div>
+      </div>
+      <div class="input input-dropdown splunk-view">
+        <label>Threshold method</label>
+        <div id="outlierSearchTypeControl"></div>
+      </div>
+      <div class="input input-text splunk-view">
+        <label>Threshold multiplier</label>
+        <div id="scaleFactorControl"></div>
+      </div>
+      <div class="input input-text splunk-view">
+        <div class="checkbox">
+          <label><div id="windowedAnalysisCheckboxControl"></div>Sliding window (samples / window)</label>
+        </div>
+        <div id="windowSizeControl"></div>
+      </div>
+      <div id="submitControl" class="form-submit splunk-view splunk-submit-button" ></div>
+      <div id="errorDisplay" class="alerts shared-flashmessages app-error-messages"></div>
+    </html>
+  </fieldset>
+  <row>
+    <panel id="single_outliers_panel">
+      <single depends="$outlierVariableToken$">
+        <title>Outlier(s)</title>
+        <search base="outliersCountSearch"></search>
+        <option name="afterLabel"> Outlier(s)</option>
+      </single>
+    </panel>
+    <panel id="single_results_panel">
+      <single depends="$outlierVariableToken$">
+        <title>Total Event(s)</title>
+        <search base="resultsCountSearch"></search>
+        <option name="afterLabel"> Total Event(s)</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel depends="$outlierVariableToken$">
+      <html>
+        <h3>Outlier(s)</h3>
+        <div id="outliersPanel" class="splunk-view">
+          <div class="alert"></div>
+        </div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel depends="$outlierVariableToken$">
+      <html>
+        <h3>Dataset Preview</h3>
+        <div id="outliersTable"></div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel depends="$outlierVariableToken$">
+      <html>
+        <h3>Underlying Search</h3>
+        <div id="searchStringDisplay"></div>
+      </html>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <table depends="$searchBarSearchJobIdToken$" rejects="$outlierVariableToken$">
+        <title>Dataset Preview</title>
+        <search base="searchBarSearch"></search>
+      </table>
+    </panel>
+  </row>
+</form>

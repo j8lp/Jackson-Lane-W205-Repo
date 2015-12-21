@@ -1,0 +1,14 @@
+/* Anomaly Detection Coloring */
+
+.panel-footer {
+    display: none;
+}
+
+.outlier-event {
+    font-weight: bold;
+}
+
+.icon-inline i {
+    font-size: 18px;
+    margin-left: 5px;
+}

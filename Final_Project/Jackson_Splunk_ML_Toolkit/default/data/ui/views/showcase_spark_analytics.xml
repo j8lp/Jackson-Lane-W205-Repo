@@ -1,0 +1,140 @@
+<form script="runPageScript.js">
+
+  <label>Predict Binary Fields With Spark</label>
+  <description>Predict the value of a categorical field using the values of other fields in that event.</description>
+
+  <fieldset autoRun="false" submitButton="false">
+    <html>
+      <div id="inputControls">
+        <label>1: Choose an example dataset or enter a search</label>
+        <div class="app-datasource-controls-wrapper">
+          <div class="app-sample-search-control">
+            <div id="sampleSearchesControl"></div>
+          </div>
+          <div class="app-search-controls-wrapper">
+            <div id="searchBarControl"></div>
+            <div id="searchControlsControl"></div>
+          </div>
+        </div>
+        <br />
+        <div class="input input-dropdown splunk-view">
+          <label>2: Field to predict</label>
+          <div id="targetVariableControl"></div>
+        </div>
+        <div class="input input-multiselect splunk-view">
+          <label>3: Fields to use for predicting</label>
+          <div id="featuresVariableControl"></div>
+        </div>
+        <div class="form-submit splunk-view splunk-submit-button" id="featuresVariableSelectAllControl"></div>
+        <div class="form-submit splunk-view splunk-submit-button" id="featuresVariableClearControl"></div>
+        <div>
+          <div class="input input-text splunk-view">
+            <label>4: Model name (used to refer to it later)</label>
+            <input type="text" id="modelNameInputControl"/>
+          </div>
+          <div class="form-submit splunk-view splunk-submit-button" id="submitControl"></div>
+          <div class="form-submit splunk-view splunk-submit-button" id="applyControl"></div>
+          <div class="form-submit splunk-view splunk-submit-button" id="fitInSearchControl"></div>
+        </div>
+        <div id="errorDisplay" class="alerts shared-flashmessages app-error-messages"></div>
+      </div>
+    </html>
+  </fieldset>
+
+  <row>
+    <panel depends="$searchBarSearchJobIdToken$">
+      <table id="datasetPreviewPanel">
+        <title>Dataset Preview</title>
+        <search base="searchBarSearch">
+          <query>
+            <![CDATA[
+              | eval randomKey_ = random()
+              | sort randomKey_
+              | fields - randomKey_
+            ]]>
+          </query>
+        </search>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="dataOverlayMode">none</option>
+        <option name="drilldown">off</option>
+        <option name="count">5</option>
+        <option name="link.visible">false</option>
+        <option name="refresh.time.visible">false</option>
+        <option name="refresh.link.visible">false</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel depends="$showResultPanelsToken$">
+      <html>
+        <div class="stats-panel">
+          <div>
+            <h3 id="precisionStatisticTitle">Precision</h3>
+            <h1 id="precisionStatisticPanel"></h1>
+          </div>
+          <div>
+            <h3 id="recallStatisticTitle">Recall</h3>
+            <h1 id="recallStatisticPanel"></h1>
+          </div>
+          <div>
+            <h3 id="accuracyStatisticTitle">Accuracy</h3>
+            <h1 id="accuracyStatisticPanel"></h1>
+          </div>
+          <div>
+            <h3 id="fOneStatisticTitle">F1</h3>
+            <h1 id="fOneStatisticPanel"></h1>
+          </div>
+        </div>
+        <div>
+          <h3>Training Set Fraction: <span id="trainingSetFractionSliderValue"></span></h3>
+	      <div id="trainingSetFractionSlider">
+          </div>
+        </div>
+      </html>
+    </panel>
+    <panel depends="$showResultPanelsToken$">
+      <table id="classificationResultsPanel">
+        <title>Classification Results</title>
+        <search base="confusionMatrixTableTestSearch"></search>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="dataOverlayMode">none</option>
+        <option name="drilldown">off</option>
+        <option name="count">10</option>
+        <option name="link.visible">false</option>
+        <option name="refresh.time.visible">false</option>
+        <option name="refresh.link.visible">false</option>
+      </table>
+    </panel>
+  </row>
+
+  <!-- row>
+    <panel depends="$showResultPanelsToken$">
+      <table id="predictedDataSampleSnapshotPanel">
+        <title>Predicted Data Sample Snapshot</title>
+        <search base="testingSearch">
+          <query>
+            <![CDATA[
+              | eval randomKey_ = random()
+              | sort randomKey_
+              | fields $classificationTargetToken|s$ $classificationPredictionToken|s$ $classificationFeaturesToken$
+              | rename $classificationTargetToken|s$ as "Actual $classificationTargetToken$"
+              | rename $classificationPredictionToken|s$ as "Predicted $classificationTargetToken$"
+            ]]>
+          </query>
+        </search>
+        <option name="wrap">true</option>
+        <option name="rowNumbers">false</option>
+        <option name="dataOverlayMode">none</option>
+        <option name="drilldown">off</option>
+        <option name="count">5</option>
+        <option name="link.visible">false</option>
+        <option name="refresh.time.visible">false</option>
+        <option name="refresh.link.visible">false</option>
+      </table>
+    </panel>
+  </row -->
+
+</form>

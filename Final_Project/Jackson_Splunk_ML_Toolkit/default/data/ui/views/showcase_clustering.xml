@@ -1,0 +1,54 @@
+<form script="runPageScript.js">
+
+  <label>Cluster Events</label>
+  <description>Divide events with multiple numeric fields into clusters.</description>
+
+  <row>
+    <panel>
+      <html>
+        <div>
+          <h3>Noisy Circles</h3>
+          <div id="clusteringPlotNoisyCirclesDatasetPanel" class="splunk-view">
+          </div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <html>
+        <div>
+          <h3>Noisy Moons</h3>
+          <div id="clusteringPlotNoisyMoonsDatasetPanel" class="splunk-view">
+          </div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <html>
+        <div>
+          <h3>Blobs</h3>
+          <div id="clusteringPlotBlobsDatasetPanel" class="splunk-view">
+          </div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <html>
+        <div>
+          <h3>No Structure</h3>
+          <div id="clusteringPlotNoStructureDatasetPanel" class="splunk-view">
+          </div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+</form>

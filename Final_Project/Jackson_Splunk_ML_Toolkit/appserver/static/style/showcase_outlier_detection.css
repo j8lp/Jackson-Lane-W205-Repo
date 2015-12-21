@@ -1,0 +1,7 @@
+#single_outliers_panel .panel-body, #single_results_panel .panel-body {
+    min-height: 115px !important;
+}
+
+.panel-footer {
+    display: none;
+}

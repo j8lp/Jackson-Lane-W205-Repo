@@ -1,0 +1,110 @@
+{
+  "roles": {
+    "default": {
+      "label": "Unspecified",
+      "summaries": ["showcase_linear_regression", "showcase_classification", "showcase_outlier_detection", "showcase_categorical_outlier_detection", "showcase_predictive_analytics", "showcase_clustering"]
+    }
+  },
+  "summaries": {
+    "showcase_linear_regression": {
+      "name": "Predict Numeric Fields",
+      "description": "<p>Predict the value of a numeric field using a weighted combination of the values of other fields in that event. A common use of these predictions is to identify anomalies: predictions that differ significantly from the actual value may be considered anomalous. IT admins could predict the values of sensors that were malfunctioning; security analysts could predict how much data a user is likely to transfer and flag unusually high prediction errors; and business analysts could predict the likely spending habits of customers.</p><p>Algorithm: Linear Regression</p>",
+      "dashboard": "showcase_linear_regression",
+      "examples": [
+        {
+          "name": "Housing",
+          "label": "Predict Median House Value"
+        },
+        {
+          "name": "Runs Scored",
+          "label": "Predict Baseball Runs"
+        },
+        {
+          "name": "App Usage",
+          "label": "Predict App Usage from Other Apps"
+        }
+      ]
+    },
+    "showcase_classification": {
+      "name": "Predict Categorical Fields",
+      "description": "<p>Predict the value of a categorical field using the values of other fields in that event. A common use of these predictions is to identify anomalies: high-confidence predictions that turn out to be incorrect may be considered anomalous. IT admins could predict the correct values of missing configuration variables; security analysts could predict what actions a user is likely to perform and raise an alert when the user behaves unexpectedly; and business analysts could predict customer churn based on other factors.</p> <p>Algorithm: Logistic Regression</p>",
+      "dashboard": "showcase_classification",
+      "examples": [
+        {
+          "name": "Churn",
+          "label": "Predict Telecom Customer Churn"
+        },
+        {
+          "name": "Iris",
+          "label": "Predict Species of Iris from Physical Measurements"
+        },
+        {
+          "name": "Diabetes",
+          "label": "Predict Incidence of Diabetes from Health Metrics"
+        }
+      ]
+    },
+    "showcase_outlier_detection": {
+      "name": "Detect Numeric Outliers",
+      "description": "<p>Find values that are far from previous values. IT admins could look for machines with unusually high resource utilization; security analysts could look for employees transfering unusually large amounts of data; and business analysts could identify big spenders.</p> <p>Algorithm: Distribution statistics</p>",
+      "dashboard": "showcase_outlier_detection",
+      "examples": [
+        {
+          "name": "Server Response Time",
+          "label": "Detect Outliers in Server Response Time"
+        },
+        {
+          "name": "Housing (prediction errors)",
+          "label": "Detect Outliers in House Value (vs. Predicted Value)"
+        },
+        {
+          "name": "Housing Crime Outliers",
+          "label": "Detect Outliers in Crime Rates"
+        },
+        {
+          "name": "Runs Scored",
+          "label": "Detect Outliers in Predicted Runs Scored"
+        }
+      ]
+    },
+    "showcase_categorical_outlier_detection": {
+      "name": "Detect Categorical Outliers",
+      "description": "<p>Find events that contain unusual combinations of values. IT admins could look for unusual machine configurations; security analysts could look for employees performing an atypical combination of activities; and business analysts could identify rare purchasing habits.</p> <p>Algorithm: Probabilistic measures</p>",
+      "dashboard": "showcase_categorical_outlier_detection",
+      "examples": [
+        {
+          "name": "Mortgage Loans Data - New York",
+          "label": "Detect Outliers in Mortgage Contract Data"
+        },
+        {
+          "name": "Congressional Voting Records",
+          "label": "Detect Outliers in Congressional Voting Records"
+        },
+        {
+          "name": "Diabetic Data",
+          "label": "Detect Outliers in Diabetes Patient Records"
+        }
+      ]
+    },
+    "showcase_predictive_analytics": {
+      "name": "Forecast Time Series",
+      "description": "<p>Predict likely future values given past values of a metric (numerical time series). IT admins could perform capacity planning by forecasting when a resource will be exhausted; security analysts could identify subtle attack signatures by finding trends; and business analysts could forecast earnings and other business metrics.</p> <p>Algorithm: State-space Method using Kalman Filter</p>",
+      "dashboard": "showcase_predictive_analytics",
+      "examples": [
+        {
+          "name": "Cow Milk Production Data",
+          "label": "Forecast Cow Milk Production"
+        },
+        {
+          "name": "Iron Production Data",
+          "label": "Forecast Iron Production"
+        }
+      ]
+    },
+    "showcase_clustering": {
+      "name": "Cluster Events",
+      "description": "<p>Divide events with multiple numeric fields into clusters. Some algorithms allow you to specify the desired number of clusters, while others decide for you. The dashboard displays scatterplots of various datasets, with each point colored according to the cluster assigned to it.</p> <p>Algorithms: K-means, DBSCAN, Spectral Clustering, BIRCH</p>",
+      "dashboard": "showcase_clustering"
+    }
+  }
+}

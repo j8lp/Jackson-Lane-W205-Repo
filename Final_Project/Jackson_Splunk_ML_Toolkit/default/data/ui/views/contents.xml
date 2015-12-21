@@ -1,0 +1,35 @@
+<dashboard script="runPageScript.js">
+  <label>Overview</label>
+
+  <row>
+    <panel>
+      <html>
+        <div class="welcome-header">
+          Welcome to the Machine Learning Toolkit and Showcase. Click
+          on the dashboards or examples below to explore the kinds of
+          analytics this app enables. Each dashboard includes both
+          end-to-end examples with datasets we have provided, as well
+          as the ability to apply the dashboard to your own data. You
+          can inspect the dashboard panels and other code to see how
+          each one works and then create custom dashboards to suit
+          your needs. Everything you see was implemented on the Splunk
+          platform using public interfaces, so you can
+          bring similar functionality to your own organization's
+          Splunk instance; there's nothing hidden up our sleeves.
+        </div>
+      </html>
+    </panel>
+  </row>
+
+  <row id="rolePickerRow">
+    <panel>
+      <html>
+        <div class="input input-dropdown splunk-view">
+          <label>Select your role:</label>
+          <div id="rolePickerControl"></div>
+        </div>
+      </html>
+    </panel>
+  </row>
+
+</dashboard>

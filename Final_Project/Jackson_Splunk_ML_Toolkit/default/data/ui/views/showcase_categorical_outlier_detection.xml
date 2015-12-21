@@ -1,0 +1,91 @@
+<form script="runPageScript.js">
+    <label>Detect Categorical Outliers</label>
+    <description>Find events that contain unusual combinations of values.</description>
+    <fieldset autoRun="false" submitButton="false">
+        <html>
+            <label>Choose an example dataset or enter a search</label>
+            <div class="app-datasource-controls-wrapper">
+                <div class="app-sample-search-control">
+                    <div id="sampleSearchesControl"></div>
+                </div>
+                <div class="app-search-controls-wrapper">
+                    <div id="searchBarControl"></div>
+                    <div id="searchControlsControl"></div>
+                </div>
+            </div>
+            <div class="input input-multiselect splunk-view">
+                <label>Field(s) to analyze</label>
+                <div id="anomalyFieldsControl"></div>
+            </div>
+
+            <div class="form-submit splunk-view splunk-submit-button" id="selectAllControl"></div>
+            <div class="form-submit splunk-view splunk-submit-button" id="clearControl"></div>
+            <div class="form-submit splunk-view splunk-submit-button" id="submitControl"></div>
+            <div class="alerts shared-flashmessages app-error-messages" id="errorDisplay" ></div>
+        </html>
+    </fieldset>
+
+    <row>
+        <panel depends="$anomalyFieldToken$" id="single_outliers_panel">
+            <single>
+                <title>Outlier(s)</title>
+                <search base="anomalousEventsCountSearch"></search>
+                <option name="afterLabel"> Outlier(s)</option>
+            </single>
+        </panel>
+        <panel depends="$anomalyFieldToken$" id="single_results_panel">
+            <single>
+                <title>Total Event(s)</title>
+                <search base="anomalyDetectionResultsCountSearch"></search>
+                <option name="afterLabel"> Total Event(s)</option>
+            </single>
+        </panel>
+    </row>
+
+    <row>
+        <panel>
+            <table id="anomaly_detection_results" depends="$anomalyFieldToken$">
+                <title>Raw Data and Outlier status</title>
+                <search base="anomalyDetectionResultsSearch">
+                    <query>
+                    </query>
+                </search>
+                <option name="drilldown">none</option>
+                <option name="count">10</option>
+                <option name="link.exportResults.visible">false</option>
+                <option name="link.inspectSearch.visible">false</option>
+                <option name="link.openSearch.visible">false</option>
+                <option name="refresh.link.visible">false</option>
+                <option name="refresh.time.visible">false</option>
+            </table>
+        </panel>
+    </row>
+
+    <row>
+        <panel depends="$anomalyFieldToken$">
+            <table id="datasetPreviewPanel">
+                <title>Dataset Preview</title>
+                <search base="searchBarSearch">
+                    <query>
+                    </query>
+                </search>
+                <option name="wrap">true</option>
+                <option name="rowNumbers">false</option>
+                <option name="dataOverlayMode">none</option>
+                <option name="drilldown">off</option>
+                <option name="count">5</option>
+                <option name="link.visible">false</option>
+                <option name="refresh.time.visible">false</option>
+                <option name="refresh.link.visible">false</option>
+            </table>
+        </panel>
+    </row>
+    <row>
+        <panel depends="$anomalyFieldToken$">
+            <html>
+                <h3>Underlying Search</h3>
+                <div id="searchStringDisplay"></div>
+            </html>
+        </panel>
+    </row>
+</form>
